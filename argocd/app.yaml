@@ -1,0 +1,23 @@
+# An ArgoCD "Application": it tells ArgoCD which Git repo and folder to deploy.
+# REPO_URL_PLACEHOLDER is replaced by the GitHub Action with YOUR repo's URL,
+# so ArgoCD deploys whatever is in the app/ folder of your own repo.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: REPO_URL_PLACEHOLDER
+    targetRevision: main
+    path: app
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: my-app
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

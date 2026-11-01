@@ -1,0 +1,47 @@
+# The app ArgoCD deploys: a tiny nginx web page.
+# Edit the message below, push to main, and ArgoCD updates the running app.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hello-html
+  namespace: my-app
+data:
+  index.html: |
+    <h1>Hello from my first EKS + ArgoCD app (version 1)</h1>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+  namespace: my-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: hello }
+  template:
+    metadata:
+      labels: { app: hello }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: html
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: html
+          configMap:
+            name: hello-html
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello
+  namespace: my-app
+spec:
+  selector: { app: hello }
+  ports:
+    - port: 80
+      targetPort: 80
