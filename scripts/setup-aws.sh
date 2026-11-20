@@ -35,6 +35,15 @@ if ! aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_
 fi
 
 # 3. Role that only YOUR repo can assume
+# GitHub's OIDC subject can embed immutable IDs (repo:<user>@<owner-id>/<repo>@<repo-id>:...),
+# so allow both the name form and the ID form. The repo must be public for this lookup.
+IDS="$(curl -fsSL "https://api.github.com/repos/${GH_USER}/${REPO}" \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["owner"]["id"], d["id"])' 2>/dev/null || true)"
+SUB_ID_PATTERN=""
+if [ -n "$IDS" ]; then
+  read -r OWNER_ID REPO_ID <<<"$IDS"
+  SUB_ID_PATTERN=", \"repo:${GH_USER}@${OWNER_ID}/${REPO}@${REPO_ID}:*\""
+fi
 cat > /tmp/trust.json <<JSON
 {
   "Version": "2012-10-17",
@@ -44,7 +53,7 @@ cat > /tmp/trust.json <<JSON
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {
       "StringEquals": {"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"},
-      "StringLike": {"token.actions.githubusercontent.com:sub": "repo:${GH_USER}/${REPO}:*"}
+      "StringLike": {"token.actions.githubusercontent.com:sub": ["repo:${GH_USER}/${REPO}:*"${SUB_ID_PATTERN}]}
     }
   }]
 }
