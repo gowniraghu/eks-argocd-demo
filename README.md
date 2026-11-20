@@ -6,7 +6,7 @@ By the end you will have, in your own AWS account:
 - an **EKS cluster** (Kubernetes on AWS), built by **Terraform**
 - **ArgoCD** installed on it
 - a small web app **deployed by ArgoCD from your own GitHub repo**
-- a **GitHub Action** that does all of this when you push code
+- a **GitHub Action** that does all of this when you run it (it logs in to AWS with an access key stored as a GitHub secret)
 
 ## How it fits together
 
@@ -26,7 +26,6 @@ After the first run, changing a file in `app/` and pushing is enough. ArgoCD not
 | `app/app.yaml` | The app itself (a tiny nginx web page) that ArgoCD deploys |
 | `argocd/app.yaml` | Tells ArgoCD where your app lives (your repo, folder `app`) |
 | `.github/workflows/deploy.yaml` | The GitHub Action |
-| `scripts/setup-aws.sh` | One-time AWS setup so GitHub can log in to AWS |
 
 ## Before you start: cost warning
 EKS costs roughly **$5-6 per day** while it exists. Do Step 8 (destroy) when you finish. Use a personal or training AWS account, not a work one.
@@ -61,33 +60,37 @@ No `gh`? Create an empty public repo on github.com instead, then:
 git remote add origin https://github.com/<your-user>/eks-argocd-demo.git
 git push -u origin main
 ```
-The first push triggers the Action, and it will **fail** because AWS isn't set up yet. That's expected. Do Step 3 and 4, then re-run it.
+The first push may trigger the Action, and it will **fail** because AWS isn't set up yet. That's expected. Do Step 3 and 4, then start a new run.
 
-## Step 3: One-time AWS setup (lets GitHub log in to AWS)
-This creates a bucket for Terraform's memory (state), and an IAM role that only your repo can use.
+## Step 3: Create a bucket for Terraform's memory (state)
+Terraform must remember what it built. The Action runs on a fresh machine every time, so the state lives in an S3 bucket. Run this once with your own AWS login from Step 1:
 
 ```bash
-./scripts/setup-aws.sh <your-github-user> eks-argocd-demo ap-south-1
+REGION=ap-south-1
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BUCKET=tfstate-$ACCOUNT_ID-$REGION
+
+aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
+  --create-bucket-configuration LocationConstraint="$REGION"   # in us-east-1 leave this line out
+aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+echo "$BUCKET"
 ```
-At the end it prints three values. Keep them for Step 4.
+Keep the bucket name for Step 4.
 
-The script looks up your repo's numeric IDs from the GitHub API (the repo must be public) and trusts both forms of GitHub's login identity, `repo:<user>/<repo>` and `repo:<user>@<owner-id>/<repo>@<repo-id>`. GitHub can send the second form, and a role that trusts only the first one rejects the login.
+## Step 4: Give GitHub the AWS login and settings
+The Action logs in to AWS with an **access key** of an IAM user that is allowed to create a VPC, an EKS cluster and IAM roles (for learning, `AdministratorAccess`; never do this in a real account). Create a **new** access key for it (IAM > Users > your user > Security credentials), and use it only for this demo.
 
-(The role gets `AdministratorAccess` to keep learning simple. Don't do this in a real account.)
+On github.com open your repo, then **Settings > Secrets and variables > Actions**, or use the CLI (it asks for each value; **never paste keys into chat, code or commits**):
 
-## Step 4: Give GitHub those three values
-On github.com open your repo, then **Settings > Secrets and variables > Actions**:
-
-1. **Secrets** tab > *New repository secret*: name `AWS_ROLE_ARN`, value from the script.
-2. **Variables** tab > *New repository variable* twice: `AWS_REGION` and `TF_STATE_BUCKET`, with the values from the script.
-
-Or with the CLI:
 ```bash
-gh secret set AWS_ROLE_ARN --body "arn:aws:iam::<account>:role/github-actions-eks-demo"
+gh secret set AWS_ACCESS_KEY_ID
+gh secret set AWS_SECRET_ACCESS_KEY
 gh variable set AWS_REGION --body "ap-south-1"
-gh variable set TF_STATE_BUCKET --body "<bucket from script>"
+gh variable set TF_STATE_BUCKET --body "<bucket from Step 3>"
 ```
-Set them as **repository** secrets and variables. The workflow job also uses an environment named `variables` (`environment: variables` in `deploy.yaml`), which GitHub creates automatically. Variables and secrets defined only inside a *different* environment are not visible to the job and show up as empty values.
+Set them as **repository** secrets and variables. The workflow job also uses an environment named `variables` (`environment: variables` in `deploy.yaml`), which GitHub creates automatically. Variables defined only inside a *different* environment are not visible to the job and show up empty.
+
+**Security:** these keys stay valid until you delete them, and anyone who can edit the workflow can read them. Delete the key in AWS (IAM > Security credentials > Delete) and the two secrets in GitHub as soon as you finish (Step 8). The safer pattern for real projects is OpenID Connect (OIDC): GitHub proves its identity to AWS and gets temporary credentials, so no long-lived key is stored. See "Safer alternative" at the end.
 
 ## Step 5: Run the Action to build everything
 Repo > **Actions** tab > *EKS + ArgoCD* > **Run workflow** > choose `apply` > Run.
@@ -123,14 +126,20 @@ git commit -am "Change message" && git push
 Within about 3 minutes ArgoCD syncs it (click *Refresh* in the UI to speed it up). Reload `http://localhost:8081` to see the change. You changed Git and the cluster followed. This is GitOps.
 
 ## Step 8: Delete everything (stop the charges)
-Repo > Actions > *EKS + ArgoCD* > Run workflow > choose `destroy`.
-
-Afterwards, in AWS, you can also delete the state bucket and the `github-actions-eks-demo` role if you're finished for good. If you skip them they cost almost nothing.
+1. Repo > Actions > *EKS + ArgoCD* > Run workflow > choose `destroy`. Wait for the green check.
+2. Then delete the state bucket if you're finished for good (empty it first, including old versions).
+3. **Delete the access key** in AWS (IAM > Users > Security credentials), and the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` secrets in GitHub:
+   ```bash
+   gh secret delete AWS_ACCESS_KEY_ID
+   gh secret delete AWS_SECRET_ACCESS_KEY
+   ```
+   Deleting only the GitHub secret is not enough, because the key stays valid in AWS.
 
 ## Troubleshooting
-- **"Could not assume role" / "not authorized to perform sts:AssumeRoleWithWebIdentity":** the repo name in Step 3 must match your GitHub `user/repo` exactly, `AWS_ROLE_ARN` must be set, and the role's trust policy must allow your repo's login identity (including the ID form, see Step 3). CloudTrail's `AssumeRoleWithWebIdentity` event shows the exact identity GitHub sent.
-- **"Input required and not supplied: aws-region" or "Could not load credentials":** `AWS_REGION` or `AWS_ROLE_ARN` is empty in the job. Define them as repository secrets and variables (Step 4), or in the `variables` environment the job uses. Then start a **new** run with *Run workflow*, because "Re-run" reuses the old commit.
-- **`kubectl`: "You must be logged in to the server":** only the GitHub Actions role is cluster admin, because it created the cluster. Give your own IAM user access:
+- **"Input required and not supplied: aws-region":** `AWS_REGION` is empty in the job. Define it as a repository variable (Step 4), or in the `variables` environment the job uses. Then start a **new** run with *Run workflow*, because "Re-run" reuses the old commit.
+- **"Credentials could not be loaded" / "InvalidClientTokenId" / "SignatureDoesNotMatch":** `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` is missing, mistyped, or the key was deleted or made inactive.
+- **`AccessDenied` during plan/apply:** the IAM user behind the key lacks permissions for EKS, VPC, EC2 or IAM.
+- **`kubectl`: "You must be logged in to the server":** the cluster creator is the IAM user whose key the Action uses. If you run `kubectl` as someone else, give that identity access:
   ```bash
   ME=$(aws sts get-caller-identity --query Arn --output text)
   aws eks create-access-entry --cluster-name demo-eks --region ap-south-1 --principal-arn "$ME"
@@ -138,10 +147,13 @@ Afterwards, in AWS, you can also delete the state bucket and the `github-actions
     --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster
   ```
   (For a role, use the role ARN, not the assumed-role ARN from `get-caller-identity`.)
-- **Backend / bucket error:** check the `TF_STATE_BUCKET` and `AWS_REGION` variables.
+- **Backend / bucket error:** check the `TF_STATE_BUCKET` and `AWS_REGION` variables, and that the bucket is in that region.
 - **ArgoCD app shows "Unknown" or can't read the repo:** make sure the repo is public.
 - **Destroy fails on VPC:** run destroy again. Leftover load balancers take a few minutes to go away.
-- **Quota errors for NAT gateway / Elastic IP:** pick another region in Step 3.
+- **Quota errors for NAT gateway / Elastic IP:** pick another region (set `AWS_REGION` and create the bucket there).
 
 ## Next steps once this works
 Add your own app (a Helm chart or more YAML in `app/`), then add an Ingress or LoadBalancer Service so it's reachable without port-forward, then split into separate repos (infra repo and app repo), which is how teams usually do it.
+
+## Safer alternative: OIDC instead of access keys
+Instead of storing a key, GitHub can sign a short-lived identity token and AWS can exchange it for temporary credentials. You create, once, an IAM OIDC provider for `token.actions.githubusercontent.com` and an IAM role whose trust policy only allows your repo, then use `role-to-assume: ${{ secrets.AWS_ROLE_ARN }}` in `deploy.yaml` instead of the two key inputs (the job already has `permissions: id-token: write`). Watch the role's trust policy: GitHub's `sub` claim can come as `repo:<user>/<repo>:...` or `repo:<user>@<owner-id>/<repo>@<repo-id>:...`, so allow both forms. This repo's history shows that setup.
