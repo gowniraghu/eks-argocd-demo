@@ -1,5 +1,7 @@
 # EKS + ArgoCD: step-by-step for beginners
 
+తెలుగులో వివరణ కోసం [README.te.md](README.te.md) చూడండి.
+
 By the end you will have, in your own AWS account:
 - an **EKS cluster** (Kubernetes on AWS), built by **Terraform**
 - **ArgoCD** installed on it
